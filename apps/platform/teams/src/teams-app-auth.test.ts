@@ -96,9 +96,21 @@ function message(id: string, conversationId = `conv_${id}`) {
   };
 }
 
-function post(id: string, token: string, conversationId?: string) {
+/** Fields a test sets on the message activity, as Teams would send them. */
+interface MessagePatch {
+  attachments?: { content: string; contentType: string }[];
+  text?: string;
+  textFormat?: "plain";
+}
+
+function post(
+  id: string,
+  token: string,
+  conversationId?: string,
+  patch: MessagePatch = {}
+) {
   return fetch(`http://127.0.0.1:${app.port}/api/messages`, {
-    body: JSON.stringify(message(id, conversationId)),
+    body: JSON.stringify({ ...message(id, conversationId), ...patch }),
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
@@ -207,6 +219,24 @@ describe("teams app service token verification", () => {
       );
     });
   }
+});
+
+describe("teams app message text", () => {
+  // The shape Teams desktop sends, from a sample payload on Microsoft Q&A:
+  // plain text in `text`, and the same message as HTML in an attachment.
+  test("a command arrives as the plain text, not the HTML copy", async () => {
+    const response = await post("act_command", signToken(claims()), undefined, {
+      attachments: [{ content: "<p>!stop</p>", contentType: "text/html" }],
+      text: "!stop",
+      textFormat: "plain",
+    });
+
+    expect(response.status).toBeLessThan(300);
+    expect(
+      await waitFor(() => received.some((a) => a.id === "act_command"))
+    ).toBe(true);
+    expect(received.find((a) => a.id === "act_command")?.text).toBe("!stop");
+  });
 });
 
 describe("teams app turn scheduling", () => {

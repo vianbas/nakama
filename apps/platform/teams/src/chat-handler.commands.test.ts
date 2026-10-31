@@ -1,0 +1,443 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { resetActiveStreamsForTests } from "@nakama/core/channel-active-stream";
+import { withTempHome } from "@nakama/core/channel-test-helpers";
+import { activity, CONFIG, createHarness } from "./test-helpers";
+
+// Spelled out: a formatter turns "\u00A0" into the bare character, which looks
+// like a plain space.
+const NO_BREAK_SPACE = String.fromCodePoint(0xa0);
+
+/** A turn that only ends when it is stopped, like a long tool run. */
+function hangingTurn() {
+  let markStarted = () => {};
+
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+
+  const signals: AbortSignal[] = [];
+
+  const onSend = (_message: string, signal?: AbortSignal) =>
+    new Promise<string>((_resolve, reject) => {
+      const abort = () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+
+      if (signal) {
+        signals.push(signal);
+      }
+
+      markStarted();
+
+      // fetch rejects at once when its signal is already aborted.
+      if (signal?.aborted) {
+        abort();
+
+        return;
+      }
+
+      signal?.addEventListener("abort", abort);
+    });
+
+  return { onSend, signals, started };
+}
+
+describe("teams commands", () => {
+  // A turn left hanging by a failed test would hold the chat lock for the next.
+  afterEach(() => {
+    resetActiveStreamsForTests();
+  });
+
+  test("!help lists every command and starts no turn", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { handle, replies, turns } = createHarness(homeDir);
+
+      await handle(activity({ text: "!help" }));
+
+      expect(turns).toEqual([]);
+      expect(replies).toHaveLength(1);
+
+      for (const command of ["!new", "!clear", "!stop", "!status", "!help"]) {
+        expect(replies[0]?.text).toContain(command);
+      }
+    });
+  });
+
+  test("!new moves the next message to a new session", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { createdSessions, handle, turns } = createHarness(homeDir);
+
+      await handle(activity({ text: "first" }));
+      await handle(activity({ text: "!new" }));
+      await handle(activity({ text: "second" }));
+
+      expect(createdSessions).toEqual(["session_1", "session_2"]);
+      expect(turns).toEqual([
+        { message: "first", sessionId: "session_1" },
+        { message: "second", sessionId: "session_2" },
+      ]);
+    });
+  });
+
+  test("!clear clears the current session and keeps using it", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { clearedSessions, createdSessions, handle, turns } =
+        createHarness(homeDir);
+
+      await handle(activity({ text: "first" }));
+      await handle(activity({ text: "!clear" }));
+      await handle(activity({ text: "second" }));
+
+      expect(clearedSessions).toEqual(["session_1"]);
+      expect(createdSessions).toEqual(["session_1"]);
+      expect(turns.map((turn) => turn.sessionId)).toEqual([
+        "session_1",
+        "session_1",
+      ]);
+    });
+  });
+
+  test("a failed !new tells the user and keeps the current session", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      let creates = 0;
+
+      const { handle, replies, turns } = createHarness(homeDir, {
+        beforeCreateSession: async () => {
+          creates += 1;
+
+          // The chat's first session is created; the one !new asks for fails.
+          if (creates === 2) {
+            throw new Error("connect ECONNREFUSED");
+          }
+        },
+      });
+
+      await handle(activity({ text: "first" }));
+      await handle(activity({ text: "!new" }));
+      await handle(activity({ text: "second" }));
+
+      expect(replies).toHaveLength(3);
+      expect(turns.map((turn) => turn.sessionId)).toEqual([
+        "session_1",
+        "session_1",
+      ]);
+    });
+  });
+
+  test("!clear before the first message answers, and that chat keeps one session", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { clearedSessions, createdSessions, handle, replies, turns } =
+        createHarness(homeDir);
+
+      await handle(activity({ text: "!clear" }));
+      await handle(activity({ text: "first" }));
+
+      expect(replies).toHaveLength(2);
+      expect(createdSessions).toHaveLength(1);
+      expect(clearedSessions).toEqual(createdSessions);
+      expect(turns).toEqual([
+        { message: "first", sessionId: createdSessions[0] ?? "" },
+      ]);
+    });
+  });
+
+  test("!stop with nothing running answers and starts no turn", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { handle, replies, turns } = createHarness(homeDir);
+
+      await handle(activity({ text: "!stop" }));
+
+      expect(turns).toEqual([]);
+      expect(replies).toHaveLength(1);
+    });
+  });
+
+  test("!stop cancels a running turn", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const turn = hangingTurn();
+
+      const { handle, replies } = createHarness(homeDir, {
+        onSend: turn.onSend,
+      });
+
+      const running = handle(activity({ text: "long job" }));
+      await turn.started;
+      await handle(activity({ text: "!stop" }));
+      await running;
+
+      expect(turn.signals.map((signal) => signal.aborted)).toEqual([true]);
+      expect(replies.map((reply) => reply.text)).toEqual([
+        "Stopping…",
+        "Stopped.",
+      ]);
+    });
+  });
+
+  test("!stop while the session is still being created stops the turn", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const turn = hangingTurn();
+
+      let markCreating = () => {};
+
+      let finishCreating = () => {};
+
+      const creating = new Promise<void>((resolve) => {
+        markCreating = resolve;
+      });
+
+      const created = new Promise<void>((resolve) => {
+        finishCreating = resolve;
+      });
+
+      const { handle, replies } = createHarness(homeDir, {
+        beforeCreateSession: async () => {
+          markCreating();
+          await created;
+        },
+        onSend: turn.onSend,
+      });
+
+      const running = handle(activity({ text: "long job" }));
+      await creating;
+      await handle(activity({ text: "!stop" }));
+      finishCreating();
+      await running;
+
+      expect(turn.signals.map((signal) => signal.aborted)).toEqual([true]);
+      expect(replies.map((reply) => reply.text)).toEqual([
+        "Stopping…",
+        "Stopped.",
+      ]);
+    });
+  });
+
+  // The running turn holds the chat lock, so a command that waited for the
+  // lock without stopping the turn first would never run.
+  test("!new stops a running turn instead of waiting behind it", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const turn = hangingTurn();
+
+      const { createdSessions, handle } = createHarness(homeDir, {
+        onSend: turn.onSend,
+      });
+
+      const running = handle(activity({ text: "long job" }));
+      await turn.started;
+      await handle(activity({ text: "!new" }));
+      await running;
+
+      expect(turn.signals.map((signal) => signal.aborted)).toEqual([true]);
+      expect(createdSessions).toEqual(["session_1", "session_2"]);
+    });
+  });
+
+  test("!clear stops a running turn instead of waiting behind it", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const turn = hangingTurn();
+
+      const { clearedSessions, handle } = createHarness(homeDir, {
+        onSend: turn.onSend,
+      });
+
+      const running = handle(activity({ text: "long job" }));
+      await turn.started;
+      await handle(activity({ text: "!clear" }));
+      await running;
+
+      expect(turn.signals.map((signal) => signal.aborted)).toEqual([true]);
+      expect(clearedSessions).toEqual(["session_1"]);
+    });
+  });
+
+  test("!status reports the agent, provider, model and session", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { handle, replies, turns } = createHarness(homeDir);
+
+      await handle(activity({ text: "hello" }));
+      await handle(activity({ text: "!status" }));
+
+      expect(turns).toHaveLength(1);
+
+      const status = replies.at(-1)?.text ?? "";
+
+      for (const value of [
+        "Helper",
+        "test-provider",
+        "test-model",
+        "session_",
+      ]) {
+        expect(status).toContain(value);
+      }
+    });
+  });
+
+  test("!status with no provider configured answers without asking for models", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      let modelRequests = 0;
+
+      const { handle, replies } = createHarness(homeDir, {
+        beforeGetModels: async () => {
+          modelRequests += 1;
+        },
+        health: async () => ({ ok: true, providerConfigured: false }),
+      });
+
+      await handle(activity({ text: "!status" }));
+
+      expect(modelRequests).toBe(0);
+      expect(replies).toHaveLength(1);
+      expect(replies[0]?.text).not.toContain("test-model");
+    });
+  });
+
+  test("!status still answers when the server cannot be reached", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { handle, replies, turns } = createHarness(homeDir, {
+        health: () => Promise.reject(new Error("connect ECONNREFUSED")),
+      });
+
+      await handle(activity({ text: "!status" }));
+
+      expect(turns).toEqual([]);
+      expect(replies).toHaveLength(1);
+    });
+  });
+
+  // !status waits on the server; a slow answer must not hold up the chat.
+  test("a slow !status holds up no other message", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      let markAsking = () => {};
+
+      let finishAsking = () => {};
+
+      const asking = new Promise<void>((resolve) => {
+        markAsking = resolve;
+      });
+
+      const answered = new Promise<void>((resolve) => {
+        finishAsking = resolve;
+      });
+
+      const { handle, replies } = createHarness(homeDir, {
+        beforeGetModels: async () => {
+          markAsking();
+          await answered;
+        },
+      });
+
+      // Its own chat, so a failure here cannot hold another test's lock.
+      const chat = { conversationId: "conv_slow_status" };
+      const status = handle(activity({ ...chat, text: "!status" }));
+      await asking;
+
+      const hello = handle(activity({ ...chat, text: "hello" }));
+
+      // Raced instead of awaited, so a failure still releases !status below.
+      const helloFirst = await Promise.race([
+        hello.then(() => true),
+        Bun.sleep(1000).then(() => false),
+      ]);
+
+      finishAsking();
+      await Promise.all([status, hello]);
+
+      expect(helloFirst).toBe(true);
+      expect(replies[0]?.text).toBe("echo: hello");
+      expect(replies).toHaveLength(2);
+    });
+  });
+
+  // Whitespace around a command, a line break or a no-break space included.
+  for (const [name, text] of [
+    ["spaces and a line break", "  !help\r\n"],
+    ["a no-break space", `${NO_BREAK_SPACE}!help`],
+  ] as const) {
+    test(`a command with ${name} around it is still a command`, async () => {
+      await withTempHome("nakama-teams-commands-", async (homeDir) => {
+        const { handle, replies, turns } = createHarness(homeDir);
+
+        await handle(activity({ text }));
+
+        expect(turns).toEqual([]);
+        expect(replies).toHaveLength(1);
+      });
+    });
+  }
+
+  test("an unknown command is answered and starts no turn", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { handle, replies, turns } = createHarness(homeDir);
+
+      await handle(activity({ text: "!dance" }));
+
+      expect(turns).toEqual([]);
+      expect(replies).toHaveLength(1);
+    });
+  });
+
+  // Phone keyboards capitalise the first letter of a message.
+  test("commands match regardless of letter case", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const { createdSessions, handle, turns } = createHarness(homeDir);
+
+      await handle(activity({ text: "first" }));
+      await handle(activity({ text: "!New" }));
+
+      expect(turns).toHaveLength(1);
+      expect(createdSessions).toEqual(["session_1", "session_2"]);
+    });
+  });
+
+  for (const command of ["!new", "!clear"]) {
+    test(`access removed while ${command} waits for the lock stops it there`, async () => {
+      await withTempHome("nakama-teams-commands-", async (homeDir) => {
+        let configReads = 0;
+
+        const { clearedSessions, createdSessions, handle, replies } =
+          createHarness(homeDir, {
+            loadConfig: async () => {
+              configReads += 1;
+
+              // Only the read inside the lock, on the first command, denies.
+              return configReads === 2
+                ? { ...CONFIG, allowedUserIds: [] }
+                : CONFIG;
+            },
+          });
+
+        await handle(activity({ text: command }));
+
+        expect(replies).toEqual([]);
+        expect(createdSessions).toEqual([]);
+        expect(clearedSessions).toEqual([]);
+
+        // The same command with access intact does act, so the check above
+        // is what stopped it.
+        await handle(activity({ text: command }));
+
+        expect(replies).toHaveLength(1);
+        expect(createdSessions).toHaveLength(1);
+      });
+    });
+  }
+
+  for (const command of ["!help", "!stop", "!status", "!new"]) {
+    test(`${command} from a user outside the allowlist gets no answer`, async () => {
+      await withTempHome("nakama-teams-commands-", async (homeDir) => {
+        const { createdSessions, handle, replies } = createHarness(homeDir);
+
+        await handle(
+          activity({
+            senderId: "99999999-9999-4999-8999-999999999999",
+            text: command,
+          })
+        );
+
+        expect(replies).toEqual([]);
+        expect(createdSessions).toEqual([]);
+      });
+    });
+  }
+});
