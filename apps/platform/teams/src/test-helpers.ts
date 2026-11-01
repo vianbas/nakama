@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { NakamaClient, RemoteChatSession } from "@nakama/client";
+import type { NakamaClient } from "@nakama/client";
 import { ChannelSessionStore } from "@nakama/core/channel-session-store";
 import { createDefaultTestOrgs } from "@nakama/core/channel-test-helpers";
 import type { TeamsConfigFile } from "@nakama/core/teams-config";
@@ -44,7 +44,11 @@ export function createHarness(
     config?: TeamsConfigFile | null;
     health?: () => Promise<{ ok: boolean; providerConfigured: boolean }>;
     loadConfig?: () => Promise<TeamsConfigFile | null>;
-    onSend?: (message: string, signal?: AbortSignal) => Promise<string>;
+    onSend?: (
+      message: string,
+      signal?: AbortSignal,
+      onChunk?: (delta: string) => void
+    ) => Promise<string>;
   } = {}
 ) {
   const turns: { message: string; sessionId: string }[] = [];
@@ -61,13 +65,14 @@ export function createHarness(
     id: sessionId,
     sendStream: async (
       input: { message: string },
-      _handler: Parameters<RemoteChatSession["sendStream"]>[1],
+      // The Teams handler always passes a plain chunk callback.
+      onChunk: (delta: string) => void,
       streamOptions?: { signal?: AbortSignal }
     ) => {
       turns.push({ message: input.message, sessionId });
 
       return options.onSend
-        ? await options.onSend(input.message, streamOptions?.signal)
+        ? await options.onSend(input.message, streamOptions?.signal, onChunk)
         : `echo: ${input.message}`;
     },
   });

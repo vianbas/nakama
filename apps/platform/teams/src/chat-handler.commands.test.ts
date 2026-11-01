@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { formatClientError } from "@nakama/core/api-error";
 import { resetActiveStreamsForTests } from "@nakama/core/channel-active-stream";
 import { withTempHome } from "@nakama/core/channel-test-helpers";
 import { activity, CONFIG, createHarness } from "./test-helpers";
@@ -7,8 +8,11 @@ import { activity, CONFIG, createHarness } from "./test-helpers";
 // like a plain space.
 const NO_BREAK_SPACE = String.fromCodePoint(0xa0);
 
-/** A turn that only ends when it is stopped, like a long tool run. */
-function hangingTurn() {
+/**
+ * A turn that only ends when it is stopped, like a long tool run. `partial` is
+ * streamed first, as a model that wrote some text before the tool call.
+ */
+function hangingTurn(partial = "") {
   let markStarted = () => {};
 
   const started = new Promise<void>((resolve) => {
@@ -17,8 +21,16 @@ function hangingTurn() {
 
   const signals: AbortSignal[] = [];
 
-  const onSend = (_message: string, signal?: AbortSignal) =>
+  const onSend = (
+    _message: string,
+    signal?: AbortSignal,
+    onChunk?: (delta: string) => void
+  ) =>
     new Promise<string>((_resolve, reject) => {
+      if (partial) {
+        onChunk?.(partial);
+      }
+
       const abort = () => {
         const error = new Error("aborted");
         error.name = "AbortError";
@@ -154,9 +166,22 @@ describe("teams commands", () => {
     });
   });
 
-  test("!stop cancels a running turn", async () => {
+  test("after a turn ends, !stop answers as if nothing ran", async () => {
     await withTempHome("nakama-teams-commands-", async (homeDir) => {
-      const turn = hangingTurn();
+      const { handle, replies } = createHarness(homeDir);
+
+      await handle(activity({ conversationId: "conv_fresh", text: "!stop" }));
+      await handle(activity({ text: "hello" }));
+      await handle(activity({ text: "!stop" }));
+
+      expect(replies).toHaveLength(3);
+      expect(replies[2]?.text).toBe(replies[0]?.text ?? "");
+    });
+  });
+
+  test("!stop cancels a running turn and keeps what it wrote so far", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const turn = hangingTurn("half an answer");
 
       const { handle, replies } = createHarness(homeDir, {
         onSend: turn.onSend,
@@ -168,9 +193,121 @@ describe("teams commands", () => {
       await running;
 
       expect(turn.signals.map((signal) => signal.aborted)).toEqual([true]);
-      expect(replies.map((reply) => reply.text)).toEqual([
-        "Stopping…",
-        "Stopped.",
+      // The answer to !stop, the partial reply, then the turn's own stop notice.
+      expect(replies).toHaveLength(3);
+      expect(replies[1]?.text).toBe("half an answer");
+    });
+  });
+
+  test("!stop also stops a turn queued behind the running one", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const turn = hangingTurn();
+
+      const { handle, turns } = createHarness(homeDir, {
+        onSend: (message, signal, onChunk) =>
+          message === "long job"
+            ? turn.onSend(message, signal, onChunk)
+            : Promise.resolve(`echo: ${message}`),
+      });
+
+      const running = handle(activity({ text: "long job" }));
+      await turn.started;
+      const queued = handle(activity({ text: "queued" }));
+      await handle(activity({ text: "!stop" }));
+      await Promise.all([running, queued]);
+
+      expect(turns.map((entry) => entry.message)).toEqual(["long job"]);
+    });
+  });
+
+  // The turn holds the lock but is not registered yet while it rereads access,
+  // so only the queue of waiting turns can reach it there.
+  test("!stop while a turn rereads access stops it before any session exists", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      let configReads = 0;
+
+      let markReading = () => {};
+
+      let finishReading = () => {};
+
+      const reading = new Promise<void>((resolve) => {
+        markReading = resolve;
+      });
+
+      const read = new Promise<void>((resolve) => {
+        finishReading = resolve;
+      });
+
+      const { createdSessions, handle, replies, turns } = createHarness(
+        homeDir,
+        {
+          loadConfig: async () => {
+            configReads += 1;
+
+            // The turn's read inside the lock.
+            if (configReads === 2) {
+              markReading();
+              await read;
+            }
+
+            return CONFIG;
+          },
+        }
+      );
+
+      const running = handle(activity({ text: "hello" }));
+      await reading;
+      await handle(activity({ text: "!stop" }));
+      finishReading();
+      await running;
+
+      expect(turns).toEqual([]);
+      expect(createdSessions).toEqual([]);
+      expect(replies).toHaveLength(2);
+    });
+  });
+
+  test("a server error that lands during a stop is still told", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const failure = new Error("upstream returned 500");
+      let markStarted = () => {};
+
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+
+      const { handle, replies } = createHarness(homeDir, {
+        onSend: (_message, signal) =>
+          new Promise<string>((_resolve, reject) => {
+            markStarted();
+            signal?.addEventListener("abort", () => reject(failure));
+          }),
+      });
+
+      const running = handle(activity({ text: "long job" }));
+      await started;
+      await handle(activity({ text: "!stop" }));
+      await running;
+
+      expect(replies.map((reply) => reply.text)).toContain(
+        formatClientError(failure)
+      );
+    });
+  });
+
+  test("an abort no stop asked for is told", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      const failure = new Error("provider deadline passed");
+      failure.name = "AbortError";
+
+      const { handle, replies } = createHarness(homeDir, {
+        onSend: () => Promise.reject(failure),
+      });
+
+      await handle(activity());
+
+      expect(replies).toEqual([
+        { conversationId: "conv_1", text: formatClientError(failure) },
       ]);
     });
   });
@@ -206,10 +343,7 @@ describe("teams commands", () => {
       await running;
 
       expect(turn.signals.map((signal) => signal.aborted)).toEqual([true]);
-      expect(replies.map((reply) => reply.text)).toEqual([
-        "Stopping…",
-        "Stopped.",
-      ]);
+      expect(replies).toHaveLength(2);
     });
   });
 
@@ -366,14 +500,15 @@ describe("teams commands", () => {
     });
   }
 
-  test("an unknown command is answered and starts no turn", async () => {
+  test("a message that starts with ! but names no command reaches the agent", async () => {
     await withTempHome("nakama-teams-commands-", async (homeDir) => {
-      const { handle, replies, turns } = createHarness(homeDir);
+      const { handle, turns } = createHarness(homeDir);
 
-      await handle(activity({ text: "!dance" }));
+      await handle(activity({ text: "!urgent summarise the report" }));
 
-      expect(turns).toEqual([]);
-      expect(replies).toHaveLength(1);
+      expect(turns.map((turn) => turn.message)).toEqual([
+        "!urgent summarise the report",
+      ]);
     });
   });
 
