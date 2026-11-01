@@ -105,9 +105,9 @@ function allows(
 export function createTeamsChatHandler(deps: TeamsChatHandlerDeps) {
   const { client, loadConfig, owner, send, sessionStore } = deps;
   const seenActivities = new Set<string>();
-  // Each turn from the moment it queues until it ends. The active-stream
-  // registry only knows a turn once it holds the chat lock, so !stop reaches
-  // the waiting ones through this map.
+  // Each turn from the moment it queues until the active-stream registry knows
+  // it, which is only once it holds the chat lock, so !stop reaches the
+  // waiting ones through this map.
   const waitingTurns = new Map<string, Set<AbortController>>();
 
   function stopWaitingTurns(sessionKey: string): boolean {
@@ -405,6 +405,10 @@ export function createTeamsChatHandler(deps: TeamsChatHandlerDeps) {
         // carried over.
         const signal = registerActiveStream(sessionKey);
 
+        // Left here, not when the turn ends: a !stop that comes while the
+        // finished answer is still being posted has nothing to stop.
+        leaveWaiting(sessionKey, queued);
+
         if (queued.signal.aborted) {
           stopActiveStream(sessionKey);
         }
@@ -412,6 +416,7 @@ export function createTeamsChatHandler(deps: TeamsChatHandlerDeps) {
         await runTurn(activity, sessionKey, text, signal);
       });
     } finally {
+      // A turn turned away at the lock, or one whose access read failed.
       leaveWaiting(sessionKey, queued);
     }
   };

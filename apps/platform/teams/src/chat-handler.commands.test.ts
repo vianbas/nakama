@@ -179,6 +179,42 @@ describe("teams commands", () => {
     });
   });
 
+  test("!stop while a finished answer is being posted answers as if nothing ran", async () => {
+    await withTempHome("nakama-teams-commands-", async (homeDir) => {
+      let markPosting = () => {};
+
+      let finishPosting = () => {};
+
+      const posting = new Promise<void>((resolve) => {
+        markPosting = resolve;
+      });
+
+      const posted = new Promise<void>((resolve) => {
+        finishPosting = resolve;
+      });
+
+      const { handle, replies } = createHarness(homeDir, {
+        beforeReply: async (text) => {
+          if (text === "echo: hello") {
+            markPosting();
+            await posted;
+          }
+        },
+      });
+
+      await handle(activity({ conversationId: "conv_fresh", text: "!stop" }));
+      const running = handle(activity({ text: "hello" }));
+      await posting;
+      await handle(activity({ text: "!stop" }));
+      finishPosting();
+      await running;
+
+      // Both answers to !stop, then the answer itself with no stop notice.
+      expect(replies).toHaveLength(3);
+      expect(replies[1]?.text).toBe(replies[0]?.text ?? "");
+    });
+  });
+
   test("!stop cancels a running turn and keeps what it wrote so far", async () => {
     await withTempHome("nakama-teams-commands-", async (homeDir) => {
       const turn = hangingTurn("half an answer");

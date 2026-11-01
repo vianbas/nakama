@@ -41,6 +41,7 @@ export function createHarness(
   options: {
     beforeCreateSession?: () => Promise<void>;
     beforeGetModels?: () => Promise<void>;
+    beforeReply?: (text: string) => Promise<void>;
     config?: TeamsConfigFile | null;
     health?: () => Promise<{ ok: boolean; providerConfigured: boolean }>;
     loadConfig?: () => Promise<TeamsConfigFile | null>;
@@ -127,6 +128,7 @@ export function createHarness(
       (async () => (options.config === undefined ? CONFIG : options.config)),
     owner: OWNER,
     send: async (conversationId, text) => {
+      await options.beforeReply?.(text);
       replies.push({ conversationId, text });
     },
     sessionStore,

@@ -127,6 +127,29 @@ describe("teams chat handler", () => {
     });
   });
 
+  test("a turn turned away at the lock leaves nothing for !stop", async () => {
+    await withTempHome("nakama-teams-handler-", async (homeDir) => {
+      let configReads = 0;
+
+      const { handle, replies, turns } = createHarness(homeDir, {
+        loadConfig: async () => {
+          configReads += 1;
+
+          // Only the turn's read inside the lock denies.
+          return configReads === 3 ? { ...CONFIG, allowedUserIds: [] } : CONFIG;
+        },
+      });
+
+      await handle(activity({ conversationId: "conv_fresh", text: "!stop" }));
+      await handle(activity({ text: "hello" }));
+      await handle(activity({ text: "!stop" }));
+
+      expect(turns).toEqual([]);
+      expect(replies).toHaveLength(2);
+      expect(replies[1]?.text).toBe(replies[0]?.text ?? "");
+    });
+  });
+
   test("the same activity delivered twice runs one turn", async () => {
     await withTempHome("nakama-teams-handler-", async (homeDir) => {
       const { handle, turns } = createHarness(homeDir);
