@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,4 +96,142 @@ for (const mode of [
       retryDelay: 200,
     });
   }
+}
+
+const harness = dirname(fileURLToPath(import.meta.url));
+
+const applied = Bun.spawnSync(["git", "apply", join(harness, "fix.patch")], {
+  cwd: root,
+});
+
+if (applied.exitCode !== 0) {
+  throw new Error(applied.stderr.toString());
+}
+
+const service = join(root, "apps/server/src/services/meet-recording-import.ts");
+
+const original = await Bun.file(service).text();
+
+for (const mode of [
+  "fixed-shard",
+  "fixed-interference",
+  "fixed-interference",
+  "fixed-interference",
+  "fixed-interference",
+  "fixed-interference",
+  "leak-success",
+  "leak-error",
+]) {
+  const sandbox = await mkdtemp(join(tmpdir(), "pr2574-fixed-"));
+
+  try {
+    if (mode === "leak-success") {
+      const changed = original.replace(
+        "    await rm(directory, { force: true, recursive: true });\n  }\n}",
+        "    // Diagnostic mutation: omit cleanup.\n  }\n}"
+      );
+
+      if (changed === original) {
+        throw new Error("Success cleanup mutation did not apply.");
+      }
+
+      await Bun.write(service, changed);
+    }
+
+    if (mode === "leak-error") {
+      const changed = original
+        .replace(
+          "  try {\n    const video = join(directory,",
+          "  let completed = false;\n  try {\n    const video = join(directory,"
+        )
+        .replace(
+          "    return { filename: recording.name,",
+          "    completed = true;\n    return { filename: recording.name,"
+        )
+        .replace(
+          "    await rm(directory, { force: true, recursive: true });\n  }\n}",
+          "    if (completed) await rm(directory, { force: true, recursive: true });\n  }\n}"
+        );
+
+      if (changed === original || !changed.includes("completed = true;")) {
+        throw new Error("Error cleanup mutation did not apply.");
+      }
+
+      await Bun.write(service, changed);
+    }
+
+    const args =
+      mode === "fixed-shard"
+        ? ["test", "--shard=4/4", "--parallel=2", "--timeout=30000"]
+        : [
+            "test",
+            test,
+            "--timeout=30000",
+            ...(mode === "fixed-interference" ? ["--preload", preload] : []),
+          ];
+
+    const child = Bun.spawnSync([process.execPath, ...args], {
+      cwd: join(root, "apps/server"),
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+        TEMP: sandbox,
+        TMP: sandbox,
+        TMPDIR: sandbox,
+      },
+      timeout: 240_000,
+    });
+
+    const output = child.stdout.toString() + child.stderr.toString();
+    await Bun.write(join(logs, `${mode}-${Date.now()}.log`), output);
+    console.log(mode, "exit", child.exitCode);
+    console.log(output.split("\n").slice(-15).join("\n"));
+
+    if (mode.startsWith("fixed-") && child.exitCode !== 0) {
+      throw new Error("Fixed tests must pass.");
+    }
+
+    if (
+      mode === "fixed-interference" &&
+      !(await readdir(sandbox)).some((name) =>
+        name.startsWith("nakama-meet-capture-test-")
+      )
+    ) {
+      throw new Error("The unrelated test directory must remain intact.");
+    }
+
+    if (
+      mode.startsWith("leak-") &&
+      !(child.exitCode === 1 && /nakama-meet-\d+-/.test(output))
+    ) {
+      throw new Error(
+        "The cleanup test must reject a leaked import directory."
+      );
+    }
+
+    if (
+      mode === "leak-error" &&
+      output.includes("expect(after).toEqual(before)")
+    ) {
+      throw new Error(
+        "The error mutation must reach the final cleanup assertion."
+      );
+    }
+  } finally {
+    await Bun.write(service, original);
+    await rm(sandbox, {
+      force: true,
+      maxRetries: 5,
+      recursive: true,
+      retryDelay: 200,
+    });
+  }
+}
+
+const clean = Bun.spawnSync(["git", "diff", "--exit-code", "--", service], {
+  cwd: root,
+});
+
+if (clean.exitCode !== 0) {
+  throw new Error("Diagnostic mutations were not restored.");
 }
