@@ -8,17 +8,24 @@ if (process.platform !== "win32") {
 }
 
 const root = process.cwd();
+
 const logs = process.env.REPRO_LOG_DIR;
+
 if (!logs) {
   throw new Error("REPRO_LOG_DIR is required.");
 }
+
 await mkdir(logs, { recursive: true });
+
 const preload = join(
   dirname(fileURLToPath(import.meta.url)),
   "interference.ts"
 );
+
 const test = "src/services/meet-recording-import.test.ts";
+
 const meta = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: root });
+
 console.log(
   "Revision:",
   meta.stdout.toString().trim(),
@@ -35,6 +42,7 @@ for (const mode of [
   "interference",
 ]) {
   const sandbox = await mkdtemp(join(tmpdir(), "pr2574-repro-"));
+
   try {
     const args =
       mode === "shard"
@@ -45,6 +53,7 @@ for (const mode of [
             "--timeout=30000",
             ...(mode === "interference" ? ["--preload", preload] : []),
           ];
+
     const child = Bun.spawnSync([process.execPath, ...args], {
       cwd: join(root, "apps/server"),
       env: {
@@ -56,14 +65,17 @@ for (const mode of [
       },
       timeout: 240_000,
     });
+
     const output = child.stdout.toString() + child.stderr.toString();
     const stamp = Date.now();
     await Bun.write(join(logs, `${mode}-${stamp}.log`), output);
     console.log(mode, "exit", child.exitCode);
     console.log(output.split("\n").slice(-15).join("\n"));
+
     if (mode === "alone" && child.exitCode !== 0) {
       throw new Error("The isolated control must pass.");
     }
+
     if (
       mode === "interference" &&
       !(
