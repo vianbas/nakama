@@ -1,0 +1,53 @@
+name: PR 2574 Windows reproduction
+
+on:
+  push:
+    branches: [test/2574-windows-temp-repro]
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    name: Windows ${{ matrix.revision }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - revision: baseline
+            sha: 8be73f6e98371ed53be673c99d1a500eacff4a1a
+          - revision: pr
+            sha: 79db9498ee0f183794179a574234cc1d5ea42077
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Save diagnostic harness
+        shell: bash
+        run: cp -R .github/repro-2574 "$RUNNER_TEMP/repro-2574"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.0
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts --filter nakama --filter '@nakama/server...' --filter './packages/*' --filter './packages/plugins/*'
+      - uses: AnimMouse/setup-ffmpeg@178e0b4a408f06ce40d896c3cd79f50fa6f8b0c3
+        with:
+          version: "8.1"
+      - name: Reproduce with unchanged tests
+        shell: bash
+        env:
+          REPRO_LOG_DIR: ${{ runner.temp }}/repro-results-${{ matrix.revision }}
+        run: bun "$RUNNER_TEMP/repro-2574/run.ts"
+      - name: Keep diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: windows-repro-${{ matrix.revision }}
+          path: ${{ runner.temp }}/repro-results-${{ matrix.revision }}
+          retention-days: 7
