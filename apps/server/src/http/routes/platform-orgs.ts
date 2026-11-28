@@ -627,8 +627,9 @@ export function registerPlatformOrgRoutes(
       return errorResponse("Invalid session step query", 400);
     }
 
-    const orgId = decodeURIComponent(c.req.param("orgId"));
-    const sessionId = decodeURIComponent(c.req.param("sessionId"));
+    // Hono has already decoded the path params.
+    const orgId = c.req.param("orgId");
+    const sessionId = c.req.param("sessionId");
     const stepId = parsed.data.id;
 
     // ISO with an offset becomes UTC, the form the append path stored.

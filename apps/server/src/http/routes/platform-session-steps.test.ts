@@ -208,6 +208,16 @@ describe("platform session step window", () => {
       ).status
     ).toBe(404);
 
+    // A literal percent sign in an id is a missing session, not a crash.
+    expect(
+      (
+        await get(
+          `/v1/platform/orgs/${ORG_ID}/sessions/abc%25/steps`,
+          platform.headers()
+        )
+      ).status
+    ).toBe(404);
+
     await seedSession(databaseAdapter, "session_empty");
 
     const empty = await get(
