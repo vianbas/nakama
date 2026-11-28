@@ -249,6 +249,25 @@ test("rejects an invalid step id without fetching", async () => {
   expect(getSteps).not.toHaveBeenCalled();
 });
 
+test("rejects an invalid time without fetching", async () => {
+  const getSteps = spySteps({
+    next: null,
+    previous: null,
+    step,
+  });
+
+  for (const at of ["yesterday", "2026-01-01", "2026-01-01T10:00:00"]) {
+    const container = await render(
+      `${ROUTE.replace(":orgId", "org_path").replace(":sessionId", "session_path")}?at=${encodeURIComponent(at)}`,
+      <SessionStepsPage />
+    );
+
+    expect(container.querySelector("[role='alert']")).not.toBeNull();
+  }
+
+  expect(getSteps).not.toHaveBeenCalled();
+});
+
 test("sends a valid id even when at is present so the id selects the step", async () => {
   const getSteps = spySteps({
     next: null,

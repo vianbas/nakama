@@ -41,6 +41,10 @@ export const ORGS_AUDIT_ROUTES: ReadonlyArray<readonly [string, AuditRule]> = [
     ["member.enable", "user", ":userId", ":orgId"],
   ],
   [
+    "GET /v1/platform/orgs/:orgId/sessions/:sessionId/steps",
+    ["session.steps_read", "session", ":sessionId", ":orgId"],
+  ],
+  [
     "DELETE /v1/platform/users/:userId",
     ["user.erase", "user", ":userId", null],
   ],

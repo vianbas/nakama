@@ -40,6 +40,25 @@ function parseStepId(raw: string | null) {
   return { id: value, invalid: false };
 }
 
+// The same shape the server accepts: ISO date and time with Z or an offset.
+const ISO_DATE_TIME =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+function invalidQueryMessage(
+  invalidStepId: boolean,
+  at: string | undefined
+): string | null {
+  if (invalidStepId) {
+    return "The step ID must be a positive whole number.";
+  }
+
+  if (at && !(ISO_DATE_TIME.test(at) && Number.isFinite(Date.parse(at)))) {
+    return "The time must be an ISO date and time with a time zone.";
+  }
+
+  return null;
+}
+
 function formatTime(value: string): string {
   const date = new Date(value);
 
@@ -55,8 +74,10 @@ export function SessionStepsPage() {
     searchParams.get("id")
   );
 
+  const invalidQuery = invalidQueryMessage(invalidStepId, at);
+
   const step = useQuery({
-    enabled: Boolean(orgId && sessionId) && !invalidStepId,
+    enabled: Boolean(orgId && sessionId) && !invalidQuery,
     queryFn: () =>
       client.getPlatformSessionSteps(orgId, sessionId, {
         at,
@@ -66,12 +87,12 @@ export function SessionStepsPage() {
     retry: false,
   });
 
-  if (invalidStepId) {
+  if (invalidQuery) {
     return (
       <section className="mx-auto min-w-0 max-w-3xl space-y-4">
         <h2 className="break-words font-semibold text-xl">Session recording</h2>
         <div className="space-y-2" role="alert">
-          <p>The step ID must be a positive whole number.</p>
+          <p>{invalidQuery}</p>
           <Button
             nativeButton={false}
             render={<Link to={stepsPath(orgId, sessionId)} />}

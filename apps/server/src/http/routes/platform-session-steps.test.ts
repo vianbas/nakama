@@ -233,6 +233,26 @@ describe("platform session step window", () => {
     });
   });
 
+  test("records a platform admin read in the session's org ledger", async () => {
+    const { databaseAdapter, get, platform, stepsPath } =
+      await createScenario();
+
+    expect((await get(stepsPath, platform.headers())).status).toBe(200);
+
+    const { events } = await databaseAdapter.listAuditEvents({
+      action: "session.steps_read",
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        orgId: ORG_ID,
+        outcome: "success",
+        resourceId: "session_steps",
+        resourceType: "session",
+      }),
+    ]);
+  });
+
   test("validates the timestamp and cursors, and normalizes an offset to UTC", async () => {
     const { get, platform, stepsPath } = await createScenario();
 

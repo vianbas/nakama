@@ -48,7 +48,6 @@ function SessionRecordingEntry() {
             className="h-10 rounded-xl"
             id={`${formId}-session`}
             onChange={(event) => setSessionId(event.target.value)}
-            required
             value={sessionId}
           />
         </div>
